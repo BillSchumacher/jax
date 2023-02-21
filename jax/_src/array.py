@@ -165,11 +165,8 @@ class ArrayImpl(basearray.Array):
           f"got {len(self._arrays)}")
 
     array_device_ids = set(device_id_to_buffer.keys())
-    addressable_device_ids = set(d.id for d in addressable_dev)
-    # Calculate a symmetric difference because the device ids between sharding
-    # and _arrays should match.
-    diff = set(array_device_ids) ^ set(addressable_device_ids)
-    if diff:
+    addressable_device_ids = {d.id for d in addressable_dev}
+    if diff := set(array_device_ids) ^ set(addressable_device_ids):
       dev_in_sharding_not_in_arrays = set(addressable_device_ids) - set(array_device_ids)
       dev_in_arrays_not_in_sharding = set(array_device_ids) - set(addressable_device_ids)
       err_msg = (
@@ -272,13 +269,9 @@ class ArrayImpl(basearray.Array):
 
     if dispatch.is_single_device_sharding(self.sharding) or self.is_fully_replicated:
       return lax_numpy._rewriting_take(self, idx)
-    # TODO(yashkatariya): Make it work for other Shardings too wherever its
-    # possible to not do data movement.
     elif isinstance(self.sharding, PmapSharding):
-      if not isinstance(idx, tuple):
-        cidx = (idx,) + (slice(None),) * (len(self.shape) - 1)
-      else:
-        cidx = idx + (slice(None),) * (len(self.shape) - len(idx))
+      cidx = (idx + (slice(None), ) * (len(self.shape) - len(idx)) if isinstance(
+          idx, tuple) else (idx, ) + (slice(None), ) * (len(self.shape) - 1))
       if self._npy_value is None:
         indices = tuple(self.sharding.devices_indices_map(self.shape).values())
         try:
@@ -300,16 +293,15 @@ class ArrayImpl(basearray.Array):
   def __iter__(self):
     if self.ndim == 0:
       raise TypeError("iteration over a 0-d array")  # same as numpy error
+    assert self.is_fully_replicated or self.is_fully_addressable
+    if dispatch.is_single_device_sharding(self.sharding) or self.is_fully_replicated:
+      return (sl for chunk in self._chunk_iter(100) for sl in chunk._unstack())  # type: ignore
+    elif isinstance(self.sharding, PmapSharding):
+      return (self[i] for i in range(self.shape[0]))  # type: ignore
     else:
-      assert self.is_fully_replicated or self.is_fully_addressable
-      if dispatch.is_single_device_sharding(self.sharding) or self.is_fully_replicated:
-        return (sl for chunk in self._chunk_iter(100) for sl in chunk._unstack())  # type: ignore
-      elif isinstance(self.sharding, PmapSharding):
-        return (self[i] for i in range(self.shape[0]))  # type: ignore
-      else:
-        # TODO(yashkatariya): Don't bounce to host and use `_chunk_iter` path
-        # here after uneven partitioning support is added.
-        return (api.device_put(self._value[i]) for i in range(self.shape[0]))
+      # TODO(yashkatariya): Don't bounce to host and use `_chunk_iter` path
+      # here after uneven partitioning support is added.
+      return (api.device_put(self._value[i]) for i in range(self.shape[0]))
 
   @property
   def is_fully_replicated(self) -> bool:
@@ -322,17 +314,15 @@ class ArrayImpl(basearray.Array):
     else:
       dtype_str = f'dtype={self.dtype.name})'
 
-    if self.is_fully_addressable or self.is_fully_replicated:
-      line_width = np.get_printoptions()["linewidth"]
-      s = np.array2string(self._value, prefix=prefix, suffix=',',
-                          separator=', ', max_line_width=line_width)
-      last_line_len = len(s) - s.rfind('\n') + 1
-      sep = ' '
-      if last_line_len + len(dtype_str) + 1 > line_width:
-        sep = ' ' * len(prefix)
-      return f"{prefix}{s},{sep}{dtype_str}"
-    else:
+    if not self.is_fully_addressable and not self.is_fully_replicated:
       return f"{prefix}{self.shape}, {dtype_str}"
+    line_width = np.get_printoptions()["linewidth"]
+    s = np.array2string(self._value, prefix=prefix, suffix=',',
+                        separator=', ', max_line_width=line_width)
+    last_line_len = len(s) - s.rfind('\n') + 1
+    sep = (' ' * len(prefix)
+           if last_line_len + len(dtype_str) + 1 > line_width else ' ')
+    return f"{prefix}{s},{sep}{dtype_str}"
 
   @functools.cached_property
   def is_fully_addressable(self) -> bool:
@@ -648,20 +638,17 @@ def _array_shard_arg(x, devices, indices):
 
   x_indices = x.sharding.addressable_devices_indices_map(x.shape).values()
   if not x.is_fully_addressable:
-    if tuple(x_indices) == tuple(indices):
-      return x._arrays
-    else:
-      return NotImplementedError("Cannot reshard an input that is not fully "
-                                 "addressable")
+    return (x._arrays if tuple(x_indices) == tuple(indices) else
+            NotImplementedError("Cannot reshard an input that is not fully "
+                                "addressable"))
+  if tuple(x_indices) == tuple(indices):
+    return [buf if buf.device() == d else buf.copy_to_device(d)
+            for buf, d in safe_zip(x._arrays, devices)]
+  # Resharding starts here:
+  if dispatch.is_single_device_sharding(x.sharding):
+    return pxla.shard_device_array(x, devices, indices)
   else:
-    if tuple(x_indices) == tuple(indices):
-      return [buf if buf.device() == d else buf.copy_to_device(d)
-              for buf, d in safe_zip(x._arrays, devices)]
-    # Resharding starts here:
-    if dispatch.is_single_device_sharding(x.sharding):
-      return pxla.shard_device_array(x, devices, indices)
-    else:
-      return pxla.shard_sharded_device_array_slow_path(x, devices, indices)
+    return pxla.shard_sharded_device_array_slow_path(x, devices, indices)
 
 pxla.shard_arg_handlers[ArrayImpl] = _array_shard_arg
 

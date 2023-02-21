@@ -299,11 +299,10 @@ class XlaLowering(Lowering):
     """Return a StableHLO representation of this computation."""
     if use_stablehlo:
       raise NotImplementedError("must override")
-    else:
-      module_str = xla_extension.mlir.mhlo_to_stablehlo(
-          mlir.module_to_bytecode(self.mhlo()))
-      with self.mhlo().context:
-        return ir.Module.parse(module_str)
+    module_str = xla_extension.mlir.mhlo_to_stablehlo(
+        mlir.module_to_bytecode(self.mhlo()))
+    with self.mhlo().context:
+      return ir.Module.parse(module_str)
 
   def compile(self) -> Executable:
     raise NotImplementedError("must override")
@@ -516,22 +515,13 @@ class Compiled(Stage):
     try:
       out_flat = params.executable.call(*args_flat)
     except TypeError as e:
-      # We can't transform ahead-of-time compiled calls, since we've
-      # lowered and compiled for a fixed function signature, and JAX
-      # transformations change signatures. We interpret a Tracer
-      # argument as an indication of a transformation attempt. We
-      # could check this before the executable call, but we'd rather
-      # avoid isinstance checks on the call path. Seeing a TypeError
-      # might mean that arguments have JAX-invalid types, which in
-      # turn might mean some are Tracers.
       for arg in args_flat:
         if isinstance(arg, core.Tracer):
           raise TypeError(
               "Cannot apply JAX transformations to a function lowered and "
               "compiled for a particular signature. Detected argument of "
               f"Tracer type {type(arg)}.") from e
-      else:
-        raise
+      raise
     outs = tree_util.tree_unflatten(params.out_tree, out_flat)
     return outs, out_flat, args_flat
 

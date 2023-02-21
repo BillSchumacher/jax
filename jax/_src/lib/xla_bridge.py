@@ -19,6 +19,7 @@ and provide some automatic type mapping logic for converting between Numpy and
 XLA. There are also a handful of related casting utilities.
 """
 
+
 from functools import partial, lru_cache
 import logging
 import os
@@ -40,7 +41,7 @@ iree: Optional[Any]
 
 try:
   import jax._src.iree as iree  # type: ignore
-except (ModuleNotFoundError, ImportError):
+except ImportError:
   iree = None
 
 traceback_util.register_exclusion(__file__)
@@ -409,17 +410,15 @@ def backends():
           # We always expect the CPU and interpreter backends to initialize
           # successfully.
           raise
+        # If the backend isn't built into the binary, or if it has no devices,
+        # we expect a RuntimeError.
+        err_msg = f"Unable to initialize backend '{platform}': {err}"
+        if config.jax_platforms:
+          err_msg += " (set JAX_PLATFORMS='' to automatically choose an available backend)"
+          raise RuntimeError(err_msg)
         else:
-          # If the backend isn't built into the binary, or if it has no devices,
-          # we expect a RuntimeError.
-          err_msg = f"Unable to initialize backend '{platform}': {err}"
-          if config.jax_platforms:
-            err_msg += " (set JAX_PLATFORMS='' to automatically choose an available backend)"
-            raise RuntimeError(err_msg)
-          else:
-            _backends_errors[platform] = str(err)
-            logger.info(err_msg)
-            continue
+          _backends_errors[platform] = str(err)
+          logger.info(err_msg)
     # We don't warn about falling back to CPU on Mac OS, because we don't
     # support anything else there at the moment and warning would be pointless.
     if (py_platform.system() != "Darwin" and
@@ -475,17 +474,16 @@ def _get_backend_uncached(platform=None):
               or None)
 
   bs = backends()
-  if platform is not None:
-    platform = canonicalize_platform(platform)
-    backend = bs.get(platform, None)
-    if backend is None:
-      if platform in _backends_errors:
-        raise RuntimeError(f"Backend '{platform}' failed to initialize: "
-                           f"{_backends_errors[platform]}")
-      raise RuntimeError(f"Unknown backend {platform}")
-    return backend
-  else:
+  if platform is None:
     return _default_backend
+  platform = canonicalize_platform(platform)
+  backend = bs.get(platform, None)
+  if backend is None:
+    if platform in _backends_errors:
+      raise RuntimeError(f"Backend '{platform}' failed to initialize: "
+                         f"{_backends_errors[platform]}")
+    raise RuntimeError(f"Unknown backend {platform}")
+  return backend
 
 
 @lru_cache(maxsize=None)  # don't use util.memoize because there is no X64 dependence.
@@ -495,9 +493,7 @@ def get_backend(platform=None):
 
 def get_device_backend(device=None):
   """Returns the Backend associated with `device`, or the default Backend."""
-  if device is not None:
-    return device.client
-  return get_backend()
+  return device.client if device is not None else get_backend()
 
 
 def device_count(backend: Optional[Union[str, XlaBackend]] = None) -> int:

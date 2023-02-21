@@ -90,7 +90,7 @@ zip, unsafe_zip = safe_zip, zip
 def _validate_shapes(shapes: Sequence[Shape]):
   def _check_static_shape(shape: Shape):
     checked = canonicalize_shape(shape)
-    if not all(idx >= 0 for idx in checked):
+    if any(idx < 0 for idx in checked):
       msg = f"Only non-negative indices are allowed when broadcasting" \
             f" static shapes, but got shape {shape!r}."
       raise TypeError(msg)
@@ -173,15 +173,13 @@ def _identity(x): return x
 def _extract_tracers_dyn_shape(
     shape: Sequence[Union[int, core.Tracer]]
   ) -> Tuple[List[core.Tracer], List[Optional[int]]]:
-  # Given a sequence representing a shape, pull out Tracers, replacing with None
-  if config.jax_dynamic_shapes:
-    # We must gate this behavior under a flag because otherwise the errors
-    # raised are different (and have worse source provenance information).
-    dyn_shape = [d for d in shape if isinstance(d, core.Tracer)]
-    static_shape = [None if isinstance(d, core.Tracer) else d for d in shape]
-    return dyn_shape, static_shape
-  else:
+  if not config.jax_dynamic_shapes:
     return [], list(shape)  # type: ignore
+  # We must gate this behavior under a flag because otherwise the errors
+  # raised are different (and have worse source provenance information).
+  dyn_shape = [d for d in shape if isinstance(d, core.Tracer)]
+  static_shape = [None if isinstance(d, core.Tracer) else d for d in shape]
+  return dyn_shape, static_shape
 
 def _merge_dyn_shape(
     static_shape: Sequence[Optional[int]],
@@ -558,17 +556,14 @@ def _convert_element_type(operand: ArrayLike, new_dtype: Optional[DTypeLike] = N
                           weak_type: bool = False):
   if (core.is_opaque_dtype(new_dtype) or
       core.is_opaque_dtype(getattr(operand, 'dtype', None))):
-    return convert_element_type_p.bind(operand, new_dtype=new_dtype,
-                                       weak_type=bool(weak_type))
+    return convert_element_type_p.bind(
+        operand, new_dtype=new_dtype, weak_type=weak_type)
 
   # Don't canonicalize old_dtype because x64 context might cause
   # un-canonicalized operands to be passed in.
   old_dtype = dtypes.dtype(operand, canonicalize=False)
   old_weak_type = dtypes.is_weakly_typed(operand)
-  if new_dtype is None:
-    new_dtype = old_dtype
-  else:
-    new_dtype = np.dtype(new_dtype)
+  new_dtype = old_dtype if new_dtype is None else np.dtype(new_dtype)
   new_dtype = dtypes.dtype(new_dtype, canonicalize=True)
 
   if (dtypes.issubdtype(old_dtype, np.complexfloating) and
@@ -588,8 +583,8 @@ def _convert_element_type(operand: ArrayLike, new_dtype: Optional[DTypeLike] = N
   if (old_dtype, old_weak_type) == (new_dtype, weak_type) and isinstance(operand, Array):
     return type_cast(Array, operand)
   else:
-    return convert_element_type_p.bind(operand, new_dtype=new_dtype,
-                                       weak_type=bool(weak_type))
+    return convert_element_type_p.bind(
+        operand, new_dtype=new_dtype, weak_type=weak_type)
 
 def bitcast_convert_type(operand: ArrayLike, new_dtype: DTypeLike) -> Array:
   """Elementwise bitcast.
@@ -737,8 +732,8 @@ def dot(lhs: Array, rhs: Array, precision: PrecisionLike = None,
                        precision=precision,
                        preferred_element_type=preferred_element_type)
   else:
-    raise TypeError("Incompatible shapes for dot: got {} and {}.".format(
-        lhs.shape, rhs.shape))
+    raise TypeError(
+        f"Incompatible shapes for dot: got {lhs.shape} and {rhs.shape}.")
 
 
 DotDimensionNumbers = Tuple[Tuple[Sequence[int], Sequence[int]],
@@ -884,12 +879,11 @@ def reshape(operand: ArrayLike, new_sizes: Shape,
     same_dims = tuple(dims) == tuple(range(np.ndim(operand)))
   if np.shape(operand) and same_shape and same_dims and isinstance(operand, Array):
     return type_cast(Array, operand)
-  else:
-    dyn_shape, static_new_sizes = _extract_tracers_dyn_shape(new_sizes)
+  dyn_shape, static_new_sizes = _extract_tracers_dyn_shape(new_sizes)
 
-    return reshape_p.bind(
-      operand, *dyn_shape, new_sizes=tuple(static_new_sizes),
-      dimensions=None if dims is None or same_dims else dims)
+  return reshape_p.bind(
+    operand, *dyn_shape, new_sizes=tuple(static_new_sizes),
+    dimensions=None if dims is None or same_dims else dims)
 
 def pad(operand: ArrayLike, padding_value: ArrayLike,
         padding_config: Sequence[Tuple[int, int, int]]) -> Array:
@@ -966,7 +960,7 @@ def select_n(which: ArrayLike, *cases: ArrayLike) -> Array:
     An array with shape and dtype equal to the cases, whose values are chosen
     according to ``which``.
   """
-  if len(cases) == 0:
+  if not cases:
     raise ValueError("select_n() must have at least one case")
   return select_n_p.bind(which, *cases)
 
@@ -1017,8 +1011,7 @@ def reduce(operands: Any,
   if len(flat_operands) != len(flat_init_values):
     raise ValueError('Must have same total number of operands as init_values: '
                      f' {len(flat_operands)} vs. {len(flat_init_values)}')
-  monoid_reducer = _get_monoid_reducer(computation, flat_init_values)
-  if monoid_reducer:
+  if monoid_reducer := _get_monoid_reducer(computation, flat_init_values):
     # monoid reducers bypass the weak_type_rule, so we set it explicitly.
     weak_type = dtypes.is_weakly_typed(*flat_operands) and dtypes.is_weakly_typed(*flat_init_values)
     return _convert_element_type(monoid_reducer(*flat_operands, dimensions),
@@ -1207,7 +1200,7 @@ def top_k(operand: ArrayLike, k: int) -> Tuple[Array, Array]:
   - :func:`jax.lax.approx_max_k`
   - :func:`jax.lax.approx_min_k`
   """
-  k = int(k)
+  k = k
   if k < 0:
     raise ValueError(f"k argument to top_k must be nonnegative, got {k}")
   return top_k_p.bind(operand, k=k)
@@ -1264,7 +1257,7 @@ def broadcasted_iota(dtype: DTypeLike, shape: Shape, dimension: int) -> Array:
 
 def _eye(dtype: DTypeLike, shape: Shape, offset: int) -> Array:
   """Like numpy.eye, create a 2D array with ones on a diagonal."""
-  offset = int(offset)
+  offset = offset
   dtype = dtypes.canonicalize_dtype(dtype)
   bool_eye = eq(add(broadcasted_iota(np.int32, shape, 0), np.int32(offset)),
                 broadcasted_iota(np.int32, shape, 1))
@@ -1284,7 +1277,7 @@ def _delta(dtype: DTypeLike, shape: Shape, axes: Sequence[int]) -> Array:
 
 def _tri(dtype: DTypeLike, shape: Shape, offset: int) -> Array:
   """Like numpy.tri, create a 2D array with ones below a diagonal."""
-  offset = int(offset)
+  offset = offset
   dtype = dtypes.canonicalize_dtype(dtype)
   bool_tri = ge(add(broadcasted_iota(np.int32, shape, 0), np.int32(offset)),
                 broadcasted_iota(np.int32, shape, 1))
@@ -1422,11 +1415,13 @@ def batch_matmul(lhs: Array, rhs: Array,
                  precision: PrecisionLike = None) -> Array:
   """Batch matrix multiplication."""
   if _min(lhs.ndim, rhs.ndim) < 2:
-    raise ValueError('Arguments to batch_matmul must be at least 2D, got {}, {}'
-                     .format(lhs.ndim, rhs.ndim))
+    raise ValueError(
+        f'Arguments to batch_matmul must be at least 2D, got {lhs.ndim}, {rhs.ndim}'
+    )
   if lhs.ndim != rhs.ndim:
-    raise ValueError('Arguments to batch_matmul must have same ndim, got {}, {}'
-                     .format(lhs.ndim, rhs.ndim))
+    raise ValueError(
+        f'Arguments to batch_matmul must have same ndim, got {lhs.ndim}, {rhs.ndim}'
+    )
   lhs_contract = (lhs.ndim - 1,)
   rhs_contract = (rhs.ndim - 2,)
   batch = tuple(range(lhs.ndim - 2))
@@ -1449,7 +1444,7 @@ def _upcast_fp16_for_computation(f):
   @functools.wraps(f)
   def f_wrapped(x):
     dtype = _dtype(x)
-    if dtype == np.float16 or dtype == dtypes.bfloat16:
+    if dtype in [np.float16, dtypes.bfloat16]:
       return convert_element_type(
         f(convert_element_type(x, np.float32)), dtype)
     return f(x)
@@ -1502,13 +1497,11 @@ ShapedArray.reshape = core.aval_method(reshape)      # clobbered by lax_numpy
 def _iter(tracer):
   if tracer.ndim == 0:
     raise TypeError("iteration over a 0-d array")  # same as numpy error
-  else:
-    n = int(tracer.shape[0])
-    if any(isinstance(d, core.Tracer) for d in tracer.shape):
-      return (slicing.dynamic_index_in_dim(tracer, i, keepdims=False)
-              for i in range(n))
-    else:
-      return (slicing.index_in_dim(tracer, i, keepdims=False) for i in range(n))
+  n = int(tracer.shape[0])
+  return ((slicing.dynamic_index_in_dim(tracer, i, keepdims=False)
+           for i in range(n)) if any(
+               isinstance(d, core.Tracer) for d in tracer.shape) else
+          (slicing.index_in_dim(tracer, i, keepdims=False) for i in range(n)))
 ShapedArray._iter = staticmethod(_iter)
 core.DShapedArray._iter = staticmethod(_iter)
 
@@ -1573,12 +1566,11 @@ def naryop_dtype_rule(result_dtype, accepted_dtypes, name, *avals, **kwargs):
             "to cast a float0 array to a regular zeros array. \n"
             "If you didn't expect to get a float0 you might have accidentally "
             "taken a gradient with respect to an integer argument.")
-      else:
-        msg = ('{} does not accept dtype {} at position {}. '
-               'Accepted dtypes at position {} are subtypes of {}.')
-        typename = str(np.dtype(aval_dtype).name)
-        typenames = ', '.join(t.__name__ for t in types)
-        raise TypeError(msg.format(name, typename, i, i, typenames))
+      msg = ('{} does not accept dtype {} at position {}. '
+             'Accepted dtypes at position {} are subtypes of {}.')
+      typename = str(np.dtype(aval_dtype).name)
+      typenames = ', '.join(t.__name__ for t in types)
+      raise TypeError(msg.format(name, typename, i, i, typenames))
   _check_same_dtypes(name, False, *aval_dtypes)
   return result_dtype(*avals)
 
@@ -1660,10 +1652,9 @@ def _unbroadcast(aval, x):
   assert not aval.shape or len(x_shape) == len(aval.shape)
   if not aval.shape:
     return _reduce_sum(x, list(range(len(x_shape))))
-  else:
-    dims = [i for i, (a, b) in enumerate(zip(x_shape, aval.shape)) if not core.symbolic_equal_dim(a, b)]
-    if config.jax_enable_checks: assert all(aval.shape[i] == 1 for i in dims)
-    return reshape(_reduce_sum(x, dims), aval.shape)
+  dims = [i for i, (a, b) in enumerate(zip(x_shape, aval.shape)) if not core.symbolic_equal_dim(a, b)]
+  if config.jax_enable_checks: assert all(aval.shape[i] == 1 for i in dims)
+  return reshape(_reduce_sum(x, dims), aval.shape)
 
 def _maybe_broadcast(target_shape, x):
   x_shape = np.shape(x)
@@ -1765,9 +1756,8 @@ ad.defjvp_zero(round_p)
 def _round_lower(ctx, x, *, rounding_method):
   if rounding_method is RoundingMethod.AWAY_FROM_ZERO:
     return hlo.RoundOp(x).results
-  else:
-    assert rounding_method is RoundingMethod.TO_NEAREST_EVEN
-    return hlo.RoundNearestEvenOp(x).results
+  assert rounding_method is RoundingMethod.TO_NEAREST_EVEN
+  return hlo.RoundNearestEvenOp(x).results
 mlir.register_lowering(round_p, _round_lower)
 
 is_finite_p = unop(_fixed_dtype(np.bool_), _float, 'is_finite')
@@ -1837,21 +1827,20 @@ ad.defjvp(asin_p, lambda g, x: mul(g, rsqrt(_const(x, 1) - square(x))))
 mlir.register_lowering(asin_p, partial(_nary_lower_hlo, chlo.AsinOp))
 
 def acos_impl(x):
-  if dtypes.issubdtype(_dtype(x), np.complexfloating):
-    result = mul(_const(x, 1j), acosh(x))
-    # By convention, numpy chooses the branch with positive real part.
-    rpart = real(result)
-    return select(
-      gt(rpart, _const(rpart, 0)),
-      result,
-      neg(result)
-    )
-  else:
+  if not dtypes.issubdtype(_dtype(x), np.complexfloating):
     return select(
         ne(x, _const(x, -1.0)),
         mul(_const(x, 2),
             atan2(sqrt(sub(_const(x, 1), square(x))), add(_const(x, 1), x))),
         full_like(x, np.pi))
+  result = mul(_const(x, 1j), acosh(x))
+  # By convention, numpy chooses the branch with positive real part.
+  rpart = real(result)
+  return select(
+    gt(rpart, _const(rpart, 0)),
+    result,
+    neg(result)
+  )
 
 acos_p = standard_unop(_float | _complex, 'acos')
 ad.defjvp(acos_p, lambda g, x: mul(g, -rsqrt(_const(x, 1) - square(x))))
@@ -1992,20 +1981,20 @@ mlir.register_lowering(imag_p, partial(_nary_lower_hlo, hlo.ImagOp))
 def _complex_transpose_rule(t, x, y):
   assert ad.is_undefined_primal(x) or ad.is_undefined_primal(y)
   if ad.is_undefined_primal(x) and ad.is_undefined_primal(y):
-    if type(t) is ad_util.Zero:
-      return [ad_util.Zero(x.aval), ad_util.Zero(y.aval)]
-    else:
-      return [_unbroadcast(x.aval, real(t)), _unbroadcast(y.aval, imag(neg(t)))]
+    return ([ad_util.Zero(x.aval), ad_util.Zero(y.aval)]
+            if type(t) is ad_util.Zero else [
+                _unbroadcast(x.aval, real(t)),
+                _unbroadcast(y.aval, imag(neg(t))),
+            ])
   elif ad.is_undefined_primal(x):
     if type(t) is ad_util.Zero:
       return [ad_util.Zero(x.aval), None]
     else:
       return [_unbroadcast(x.aval, real(t)), None]
+  elif type(t) is ad_util.Zero:
+    return [None, ad_util.Zero(y.aval)]
   else:
-    if type(t) is ad_util.Zero:
-      return [None, ad_util.Zero(y.aval)]
-    else:
-      return [None, _unbroadcast(y.aval, imag(neg(t)))]
+    return [None, _unbroadcast(y.aval, imag(neg(t)))]
 
 _complex_dtype = lambda dtype, *args: (np.zeros((), dtype) + np.zeros((), np.complex64)).dtype
 complex_p = naryop(_complex_dtype, [_complex_elem_types, _complex_elem_types],
@@ -2215,15 +2204,12 @@ mlir.register_lowering(sub_p, partial(_nary_lower_hlo, hlo.SubtractOp))
 def _mul_transpose(ct, x, y):
   assert ad.is_undefined_primal(x) ^ ad.is_undefined_primal(y)
   if ad.is_undefined_primal(x):
-    if type(ct) is ad_util.Zero:
-      return [ad_util.Zero(x.aval), None]
-    else:
-      return [_unbroadcast(x.aval, mul(ct, y)), None]
+    return ([ad_util.Zero(x.aval), None] if type(ct) is ad_util.Zero else
+            [_unbroadcast(x.aval, mul(ct, y)), None])
+  if type(ct) is ad_util.Zero:
+    return [None, ad_util.Zero(y.aval)]
   else:
-    if type(ct) is ad_util.Zero:
-      return [None, ad_util.Zero(y.aval)]
-    else:
-      return [None, _unbroadcast(y.aval, mul(x, ct))]
+    return [None, _unbroadcast(y.aval, mul(x, ct))]
 
 def _mul_inverse(r, x, y):
   xr = r / y
@@ -2449,15 +2435,14 @@ def _bitcast_convert_type_shape_rule(operand, *, new_dtype):
 def _bitcast_convert_type_dtype_rule(operand, *, new_dtype):
   old_dtype = dtypes.canonicalize_dtype(operand.dtype)
   new_dtype = dtypes.canonicalize_dtype(new_dtype)
-  if (dtypes.issubdtype(old_dtype, np.bool_) or
-      dtypes.issubdtype(old_dtype, np.complexfloating) or
-      dtypes.issubdtype(new_dtype, np.bool_) or
-      dtypes.issubdtype(new_dtype, np.complexfloating)):
-    if old_dtype != new_dtype:
-      raise TypeError("lax.bitcast_convert_type does not support bool or complex values "
-                      "unless the operand and destination types match. "
-                      f"Got operand dtype={old_dtype}, {new_dtype=}. "
-                      "Consider using the arr.view() method instead.")
+  if (dtypes.issubdtype(old_dtype, np.bool_)
+      or dtypes.issubdtype(old_dtype, np.complexfloating)
+      or dtypes.issubdtype(new_dtype, np.bool_) or dtypes.issubdtype(
+          new_dtype, np.complexfloating)) and old_dtype != new_dtype:
+    raise TypeError("lax.bitcast_convert_type does not support bool or complex values "
+                    "unless the operand and destination types match. "
+                    f"Got operand dtype={old_dtype}, {new_dtype=}. "
+                    "Consider using the arr.view() method instead.")
   return new_dtype
 
 bitcast_convert_type_p = standard_primitive(
@@ -2475,11 +2460,8 @@ mlir.register_lowering(bitcast_convert_type_p, _bitcast_convert_type_lower)
 
 def _validate_preferred_element_type(input_dtype, preferred_element_type):
 
-  if dtypes.issubdtype(input_dtype, np.integer) and dtypes.issubdtype(preferred_element_type, np.floating):
-    # Special-case integer->float multiply. This is allowed, and also allows
-    # different signedness between input and output.
-    pass
-  else:
+  if not dtypes.issubdtype(input_dtype, np.integer) or not dtypes.issubdtype(
+      preferred_element_type, np.floating):
     allowed_types = (np.integer, np.floating, np.complexfloating)
     if any(dtypes.issubdtype(input_dtype, t) and not dtypes.issubdtype(preferred_element_type, t) for t in allowed_types):
       raise TypeError("Input type is incompatible with `preferred_element_type`. The compatible combinations of "
@@ -2940,7 +2922,7 @@ def _broadcast_in_dim_pp_rule(eqn, context, settings):
 
 def _broadcast_in_dim_abstract_eval(x, *dyn_shape, shape, broadcast_dimensions):
   if dyn_shape: raise NotImplementedError
-  assert not any(d is None for d in shape)  # not implemented
+  assert all(d is not None for d in shape)
   del dyn_shape
   if not any(isinstance(d, core.DArray) and
              type(core.get_aval(d).dtype) is core.bint for d in shape):
@@ -3048,7 +3030,7 @@ def _concatenate_shape_rule(*operands, **kwargs):
     raise TypeError(msg.format(dimension, ", ".join([str(o.shape) for o in operands])))
   shapes = [operand.shape[:dimension] + operand.shape[dimension+1:]
             for operand in operands]
-  if not shapes[:-1] == shapes[1:]:
+  if shapes[:-1] != shapes[1:]:
     msg = ("Cannot concatenate arrays with shapes that differ in dimensions "
            "other than the one being concatenated: concatenating along "
            "dimension {} for shapes {}.")
@@ -3069,19 +3051,18 @@ def _concatenate_transpose_rule(t, *operands, dimension):
   if type(t) is ad_util.Zero:
     return [ad_util.Zero(o.aval) if ad.is_undefined_primal(o) else None
             for o in operands]
-  else:
-    limit_points = np.cumsum(
-        [shape[dimension] for shape in operand_shapes]).tolist()
-    starts = np.zeros((len(operands), t.ndim), dtype=int).tolist()
-    limits = np.tile(t.shape, (len(operands), 1)).tolist()
+  limit_points = np.cumsum(
+      [shape[dimension] for shape in operand_shapes]).tolist()
+  starts = np.zeros((len(operands), t.ndim), dtype=int).tolist()
+  limits = np.tile(t.shape, (len(operands), 1)).tolist()
 
-    for i, s in enumerate(starts[1:]):
-      s[dimension] = limit_points[:-1][i]
-    for i, l in enumerate(limits):
-      l[dimension] = limit_points[i]
+  for i, s in enumerate(starts[1:]):
+    s[dimension] = limit_points[:-1][i]
+  for i, l in enumerate(limits):
+    l[dimension] = limit_points[i]
 
-    return [slicing.slice(t, start, limit) if ad.is_undefined_primal(o)
-            else None for o, start, limit in zip(operands, starts, limits)]
+  return [slicing.slice(t, start, limit) if ad.is_undefined_primal(o)
+          else None for o, start, limit in zip(operands, starts, limits)]
 
 def _concatenate_batch_rule(batched_args, batch_dims, *, dimension):
   size = next(op.shape[bdim] for op, bdim in zip(batched_args, batch_dims)
@@ -3120,11 +3101,11 @@ def _pad_dtype_rule(operand, padding_value, *, padding_config):
 def _pad_shape_rule(operand, padding_value, *, padding_config):
   del padding_value
   op_shape = np.shape(operand)
-  if not len(padding_config) == np.ndim(operand):
+  if len(padding_config) != np.ndim(operand):
     raise ValueError("length of padding_config must equal the number of axes "
                      f"of operand, got padding_config {padding_config} "
                      f"for operand shape {op_shape}")
-  if not all(i >= 0 for _, _, i in padding_config):
+  if any(i < 0 for _, _, i in padding_config):
     raise ValueError("interior padding in padding_config must be nonnegative, "
                      f"got padding_config {padding_config}")
   result = tuple(core.sum_dim(l, h, core.dilate_dim(d, i + 1))
@@ -3260,11 +3241,11 @@ def _reshape_shape_rule(operand, *, new_sizes, dimensions):
       not core.same_shape_sizes(np.shape(operand), new_sizes)):
     msg = 'reshape total size must be unchanged, got new_sizes {} for shape {}.'
     raise TypeError(msg.format(new_sizes, np.shape(operand)))
-  if dimensions is not None:
-    if set(dimensions) != set(range(np.ndim(operand))):
-      msg = ('reshape dimensions must be a permutation of operand dimensions, '
-             'got dimensions {} for shape {}.')
-      raise TypeError(msg.format(dimensions, np.shape(operand)))
+  if dimensions is not None and set(dimensions) != set(
+      range(np.ndim(operand))):
+    msg = ('reshape dimensions must be a permutation of operand dimensions, '
+           'got dimensions {} for shape {}.')
+    raise TypeError(msg.format(dimensions, np.shape(operand)))
   return tuple(new_sizes)
 
 def _reshape_typecheck_rule(operand, *dyn_shape, new_sizes, dimensions):
@@ -3384,7 +3365,7 @@ pe.def_trivial_padding(transpose_p)
 
 
 def _select_shape_rule(which, *cases):
-  if len(cases) == 0:
+  if not cases:
     raise TypeError("select must have at least one case")
   if any(case.shape != cases[0].shape for case in cases[1:]):
     msg = "select cases must have the same shapes, got [{}]."
@@ -3413,13 +3394,12 @@ def _select_transpose_rule(t, which, *cases):
   if type(t) is ad_util.Zero:
     return [None] + [ad_util.Zero(c.aval) if ad.is_undefined_primal(c) else None
                      for c in cases]
-  else:
-    zeros = full_like(t, 0)
-    return [None] + [
-        select(eq(which, _const(which, i)), t, zeros)
-        if ad.is_undefined_primal(case) else None
-        for i, case in enumerate(cases)
-    ]
+  zeros = full_like(t, 0)
+  return [None] + [
+      select(eq(which, _const(which, i)), t, zeros)
+      if ad.is_undefined_primal(case) else None
+      for i, case in enumerate(cases)
+  ]
 
 def _select_batch_rule(batched_args, batch_dims, **unused_kwargs):
   which, *cases = batched_args
@@ -3429,13 +3409,11 @@ def _select_batch_rule(batched_args, batch_dims, **unused_kwargs):
 
   # avoid transposes and some broadcasts in special cases
   if all(which_bdim == bdim for bdim in case_bdims):
-    if np.shape(which) == np.shape(cases[0]):
-      return select_n(which, *cases), which_bdim
-    else:
+    if np.shape(which) != np.shape(cases[0]):
       # vmapped function had a scalar which with nonscalar args
       assert np.ndim(which) == 1
       which = broadcast_in_dim(which, cases[0].shape, [which_bdim])
-      return select_n(which, *cases), which_bdim
+    return select_n(which, *cases), which_bdim
   elif np.ndim(which) == 0 and all(bdim is not None for bdim in case_bdims):
     if all(case_bdims[0] == bdim for bdim in case_bdims[1:]):
       return select_n(which, *cases), case_bdims[0]
@@ -3447,7 +3425,7 @@ def _select_batch_rule(batched_args, batch_dims, **unused_kwargs):
 
   which = (batching.bdim_at_front(which, which_bdim, size) if np.shape(which)
            else which)
-  if not all(() == np.shape(c) for c in cases):
+  if any(() != np.shape(c) for c in cases):
     cases = [batching.bdim_at_front(c, bdim, size)
              for c, bdim in zip(cases, case_bdims)]
   assert all(np.shape(cases[0]) == np.shape(c) for c in cases[1:])
@@ -3486,7 +3464,7 @@ def _select_hlo_lowering(ctx, which, *cases):
   lt = 'LT'
 
   def _select(offset, cases):
-    assert len(cases) > 0
+    assert cases
     if len(cases) == 1:
       return cases[0]
     mid = len(cases) // 2
@@ -3643,8 +3621,9 @@ mlir.register_lowering(reduce_p, _reduce_lower)
 
 def _reduce_number_dtype_rule(name, operand, *args, **kw):
   if not dtypes.issubdtype(operand.dtype, np.number):
-    raise TypeError("{} does not accept dtype {}. Accepted dtypes are subtypes "
-                    "of number.".format(name, np.dtype(operand.dtype).name))
+    raise TypeError(
+        f"{name} does not accept dtype {np.dtype(operand.dtype).name}. Accepted dtypes are subtypes of number."
+    )
   return dtypes.canonicalize_dtype(operand.dtype)
 
 def _reduce_sum_shape_rule(operand, *, axes):
@@ -3747,8 +3726,9 @@ def _argminmax_shape_rule(operand, *, axes, index_dtype):
 
 def _argminmax_dtype_rule(operand, *, axes, index_dtype):
   if not dtypes.issubdtype(index_dtype, np.integer):
-    raise TypeError("index_dtype must be an integer type, but got {}"
-                    .format(np.dtype(index_dtype).name))
+    raise TypeError(
+        f"index_dtype must be an integer type, but got {np.dtype(index_dtype).name}"
+    )
   return index_dtype
 
 def _compute_argminmax(value_comparator, get_identity,
@@ -4045,8 +4025,7 @@ def _top_k_abstract_eval(operand, *, k):
   if k < 0:
     raise ValueError(f"k argument to top_k must be nonnegative, got {k}")
   if len(operand.shape) == 0:
-    raise TypeError("top_k operand must have >= 1 dimension, got {}"
-                    .format(operand.shape))
+    raise TypeError(f"top_k operand must have >= 1 dimension, got {operand.shape}")
   shape = list(operand.shape)
   if shape[-1] < k:
     msg = "k argument to top_k must be no larger than minor dimension; {} vs {}"
@@ -4085,14 +4064,13 @@ def _top_k_jvp(primals, tangents, *, k):
 def _top_k_batch_rule(batched_args, batch_dims, *, k):
   operand, = batched_args
   bdim, = batch_dims
-  if bdim == operand.ndim-1:
-    perm = np.arange(operand.ndim)
-    perm[bdim-1], perm[bdim] = perm[bdim], perm[bdim-1]
-    top_k_v, top_k_i = top_k(transpose(operand, perm), k=k)
-    return (transpose(top_k_v, perm),
-            transpose(top_k_i, perm)), (bdim, bdim)
-  else:
+  if bdim != operand.ndim - 1:
     return top_k(operand, k=k), (bdim, bdim)
+  perm = np.arange(operand.ndim)
+  perm[bdim-1], perm[bdim] = perm[bdim], perm[bdim-1]
+  top_k_v, top_k_i = top_k(transpose(operand, perm), k=k)
+  return (transpose(top_k_v, perm),
+          transpose(top_k_i, perm)), (bdim, bdim)
 
 def _top_k_translation_rule(ctx, avals_in, avals_out, x, *, k):
   return xla.xla_destructure(ctx.builder, xops.TopK(x, k))
@@ -4178,8 +4156,9 @@ def infeed(token, shape=None, partitions=None):
   flat_shapes, treedef = pytree.flatten(shape)
   for shape in flat_shapes:
     if not isinstance(shape, ShapedArray):
-      raise TypeError("shape argument to infeed must be a pytree of "
-                      "ShapedArray values, got {}".format(shape))
+      raise TypeError(
+          f"shape argument to infeed must be a pytree of ShapedArray values, got {shape}"
+      )
   if partitions is not None:
     # Always replicate token.
     # We specifically use type() to raise an error for PartitionSpecs.
@@ -4236,11 +4215,9 @@ def outfeed(token, xs, partitions = None):
   `token` is used to sequence infeed and outfeed effects.
   `partitions` may be specified inside a `sharded_jit` or `pjit` function.
   """
-  if partitions is not None:
-    # We specifically use type() to raise an error for PartitionSpecs.
-    if type(partitions) != tuple:  # pylint: disable=unidiomatic-typecheck
-      raise ValueError(f"'partitions' argument to outfeed should be a tuple, "
-                       f"got {partitions}")
+  if partitions is not None and type(partitions) != tuple:
+    raise ValueError(f"'partitions' argument to outfeed should be a tuple, "
+                     f"got {partitions}")
   flat_xs, _ = pytree.flatten(xs)
   return outfeed_p.bind(token, *flat_xs, partitions=partitions)
 
@@ -4282,12 +4259,12 @@ def rng_uniform(a, b, shape):
 def _rng_uniform_abstract_eval(a, b, *, shape):
   if a.dtype != b.dtype:
     raise ValueError(
-      "Arguments to rng_uniform must have identical dtypes, got {} "
-      "and {}.".format(a.dtype, b.dtype))
+        f"Arguments to rng_uniform must have identical dtypes, got {a.dtype} and {b.dtype}."
+    )
   if a.shape != () or b.shape != ():
     raise ValueError(
-      "Arguments to rng_uniform must be scalars; got shapes {} and {}."
-      .format(a.shape, b.shape))
+        f"Arguments to rng_uniform must be scalars; got shapes {a.shape} and {b.shape}."
+    )
   return a.update(shape=shape, dtype=a.dtype,
                   weak_type=(a.weak_type and b.weak_type))
 
@@ -4348,7 +4325,7 @@ def _rng_bit_generator_lowering(
           (key_shape == [2] and key_etype == u64_type)), (key_shape, key_etype)
   dtype = np.dtype(dtype)
   etype = mlir.dtype_to_ir_type(dtype)
-  if dtype == np.dtype('uint32') or dtype == np.dtype('uint64'):
+  if dtype in [np.dtype('uint32'), np.dtype('uint64')]:
     rbg_etype = etype
   else:
     rbg_etype = u32_type
@@ -4394,12 +4371,11 @@ def _array_copy(arr: ArrayLike) -> Array:
 
 
 def _which_dim_sharded(s: PmapSharding) -> Optional[int]:
-  sharded_dim = None
-  for i, s in enumerate(s.sharding_spec.sharding):
-    if isinstance(s, pxla.Unstacked):
-      sharded_dim = i
-      break
-  return sharded_dim
+  return next(
+      (i for i, s in enumerate(s.sharding_spec.sharding)
+       if isinstance(s, pxla.Unstacked)),
+      None,
+  )
 
 
 def _identity_fn(x): return x
@@ -4480,11 +4456,9 @@ def _iota_abstract_eval(*, dtype, shape, dimension):
   if not 0 <= dimension < len(shape):
     raise ValueError("iota dimension must be between 0 and len(shape), got "
                      f"{dimension=} for {shape=}")
-  if not any(isinstance(d, core.DArray) and
-             type(core.get_aval(d).dtype) is core.bint for d in shape):
-    return ShapedArray(shape, dtype)
-  # TODO(mattjj): unify DShapedArray with ShapedArray, and remove this code
-  return core.DShapedArray(shape, dtype, False)
+  return (core.DShapedArray(shape, dtype, False) if any(
+      isinstance(d, core.DArray) and type(core.get_aval(d).dtype) is core.bint
+      for d in shape) else ShapedArray(shape, dtype))
 
 iota_p = Primitive('iota')
 iota_p.def_impl(partial(xla.apply_primitive, iota_p))

@@ -544,11 +544,10 @@ def iterated_vmap_binary_bcast(shape1, shape2, f):
   ndim1, ndim2 = len(shape1), len(shape2)
   if ndim1 == ndim2 == 0:
     return f
-  if 0 in [ndim1, ndim2]:
-    if ndim1 == 0:
-      return lambda x, y: iterated_vmap_unary(ndim2, lambda y: f(x, y))(y)
-    else:
-      return lambda x, y: iterated_vmap_unary(ndim1, lambda x: f(x, y))(x)
+  if ndim1 == 0:
+    return lambda x, y: iterated_vmap_unary(ndim2, lambda y: f(x, y))(y)
+  elif ndim2 == 0:
+    return lambda x, y: iterated_vmap_unary(ndim1, lambda x: f(x, y))(x)
   assert len(shape1) == len(shape2)
   for sz1, sz2 in reversed(zip(shape1, shape2)):
     if sz1 == sz2:
@@ -845,8 +844,7 @@ def _make_rotate_left(dtype):
 
 def _threefry2x32_abstract_eval(*args):
   if any(a.dtype != jnp.uint32 for a in args):
-    raise TypeError("Arguments to threefry2x32 must have uint32 type, got {}"
-                    .format(args))
+    raise TypeError(f"Arguments to threefry2x32 must have uint32 type, got {args}")
   if all(isinstance(arg, core.ShapedArray) for arg in args):
     shape = lax_internal.broadcasting_shape_rule(*args)
     named_shape = core.join_named_shapes(*(a.named_shape for a in args))
@@ -1101,9 +1099,9 @@ def threefry_2x32(keypair, count):
 
 def threefry_split(key: jax.Array, num: int) -> jax.Array:
   if config.jax_threefry_partitionable:
-    return _threefry_split_foldlike(key, int(num))  # type: ignore
+    return _threefry_split_foldlike(key, num)
   else:
-    return _threefry_split_original(key, int(num))  # type: ignore
+    return _threefry_split_original(key, num)
 
 @partial(jit, static_argnums=(1,), inline=True)
 def _threefry_split_original(key, num) -> jax.Array:
@@ -1238,7 +1236,7 @@ def _rbg_fold_in(key: jax.Array, data: jax.Array) -> jax.Array:
 
 def _rbg_random_bits(key: jax.Array, bit_width: int, shape: Sequence[int]
                      ) -> jax.Array:
-  if not key.shape == (4,) and key.dtype == jnp.dtype('uint32'):
+  if key.shape != (4, ) and key.dtype == jnp.dtype('uint32'):
     raise TypeError("_rbg_random_bits got invalid prng key.")
   if bit_width not in (8, 16, 32, 64):
     raise TypeError("requires 8-, 16-, 32- or 64-bit field width.")

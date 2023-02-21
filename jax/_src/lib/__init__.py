@@ -51,7 +51,7 @@ def check_jaxlib_version(jax_version: str, jaxlib_version: str,
     m = version_regex.match(v)
     if m is None:
       raise ValueError(f"Unable to parse jaxlib version '{v}'")
-    return tuple(int(x) for x in m.group(0).split('.'))
+    return tuple(int(x) for x in m[0].split('.'))
 
   _jax_version = _parse_version(jax_version)
   _minimum_jaxlib_version = _parse_version(minimum_jaxlib_version)

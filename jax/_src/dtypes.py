@@ -111,10 +111,7 @@ def _canonicalize_dtype(x64_enabled: bool, allow_opaque_dtype: bool, dtype: Any)
   except TypeError as e:
     raise TypeError(f'dtype {dtype!r} not understood') from e
 
-  if x64_enabled:
-    return dtype_
-  else:
-    return _dtype_to_32bit_dtype.get(dtype_, dtype_)
+  return dtype_ if x64_enabled else _dtype_to_32bit_dtype.get(dtype_, dtype_)
 
 @overload
 def canonicalize_dtype(dtype: Any, allow_opaque_dtype: Literal[False] = False) -> DType: ...
@@ -179,9 +176,9 @@ def _scalar_type_to_dtype(typ: type, value: Any = None) -> DType:
   OverflowError: Python int 9223372036854775808 too large to convert to int32
   """
   dtype = canonicalize_dtype(python_scalar_dtypes[typ])
-  if typ is int and value is not None:
-    if value < np.iinfo(dtype).min or value > np.iinfo(dtype).max:
-      raise OverflowError(f"Python int {value} too large to convert to {dtype}")
+  if (typ is int and value is not None
+      and (value < np.iinfo(dtype).min or value > np.iinfo(dtype).max)):
+    raise OverflowError(f"Python int {value} too large to convert to {dtype}")
   return dtype
 
 
@@ -462,9 +459,7 @@ def _jax_type(dtype: DType, weak_type: bool) -> JAXType:
       return dtype
     if _fp8_enabled and dtype in [_float8_e4m3fn_dtype, _float8_e5m2_dtype]:
       return float
-    if dtype == _bfloat16_dtype:
-      return float
-    return type(dtype.type(0).item())
+    return float if dtype == _bfloat16_dtype else type(dtype.type(0).item())
   return dtype
 
 def _dtype_and_weaktype(value: Any) -> Tuple[DType, bool]:
@@ -485,21 +480,47 @@ def _type_promotion_lattice(jax_numpy_dtype_promotion: str) -> Dict[JAXType, Lis
   c4, c8 = _complex_types
   i_, f_, c_ = _weak_types
   if jax_numpy_dtype_promotion == 'standard':
-    if _fp8_enabled:
-      return {
+    return ({
         b1: [i_],
-        u1: [i2, u2], u2: [i4, u4], u4: [i8, u8], u8: [f_],
-        i_: [u1, i1], i1: [i2], i2: [i4], i4: [i8], i8: [f_],
-        f_: [f1_e4m3fn, f1_e5m2, bf, f2, c_], f1_e4m3fn: [], f1_e5m2: [], bf: [f4], f2: [f4], f4: [f8, c4], f8: [c8],
-        c_: [c4], c4: [c8], c8: [],
-      }
-    return {
-      b1: [i_],
-      u1: [i2, u2], u2: [i4, u4], u4: [i8, u8], u8: [f_],
-      i_: [u1, i1], i1: [i2], i2: [i4], i4: [i8], i8: [f_],
-      f_: [bf, f2, c_], bf: [f4], f2: [f4], f4: [f8, c4], f8: [c8],
-      c_: [c4], c4: [c8], c8: [],
-    }
+        u1: [i2, u2],
+        u2: [i4, u4],
+        u4: [i8, u8],
+        u8: [f_],
+        i_: [u1, i1],
+        i1: [i2],
+        i2: [i4],
+        i4: [i8],
+        i8: [f_],
+        f_: [f1_e4m3fn, f1_e5m2, bf, f2, c_],
+        f1_e4m3fn: [],
+        f1_e5m2: [],
+        bf: [f4],
+        f2: [f4],
+        f4: [f8, c4],
+        f8: [c8],
+        c_: [c4],
+        c4: [c8],
+        c8: [],
+    } if _fp8_enabled else {
+        b1: [i_],
+        u1: [i2, u2],
+        u2: [i4, u4],
+        u4: [i8, u8],
+        u8: [f_],
+        i_: [u1, i1],
+        i1: [i2],
+        i2: [i4],
+        i4: [i8],
+        i8: [f_],
+        f_: [bf, f2, c_],
+        bf: [f4],
+        f2: [f4],
+        f4: [f8, c4],
+        f8: [c8],
+        c_: [c4],
+        c4: [c8],
+        c8: [],
+    })
   elif jax_numpy_dtype_promotion == 'strict':
     return {
       i_: [f_] + _int_types,
@@ -677,7 +698,7 @@ def result_type(*args: Any, return_weak_type_flag: bool = False) -> Union[DType,
   Returns:
     dtype or (dtype, weak_type) depending on the value of the ``return_weak_type`` argument.
   """
-  if len(args) == 0:
+  if not args:
     raise ValueError("at least one array or dtype is required")
   dtype, weak_type = _lattice_result_type(*(float_ if arg is None else arg for arg in args))
   if weak_type:

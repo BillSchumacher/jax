@@ -87,7 +87,7 @@ def add_call_stack_frames(tb):
   out = tb
 
   reached_module_level = False
-  for f, lineno in traceback.walk_stack(tb.tb_frame):
+  for f, lineno in traceback.walk_stack(out.tb_frame):
     if ignore_known_hidden_frame(f):
       continue
     if reached_module_level and f.f_code.co_name != '<module>':

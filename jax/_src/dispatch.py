@@ -108,13 +108,12 @@ def arg_spec(x: Any) -> ArgSpec:
 
   aval = xla.abstractify(x)
   try:
-    if config.jax_array:
-      if isinstance(x.sharding, PmapSharding):
-        return aval, None
-      return aval, (pjit.to_gspmd_sharding(x.sharding, x.ndim)  # type: ignore
-                    if x._committed else None)
-    else:
+    if not config.jax_array:
       return aval, x._device
+    if isinstance(x.sharding, PmapSharding):
+      return aval, None
+    return aval, (pjit.to_gspmd_sharding(x.sharding, x.ndim)  # type: ignore
+                  if x._committed else None)
   except:
     return aval, None
 
@@ -189,23 +188,15 @@ def wait_for_tokens():
 def xla_primitive_callable(prim, *arg_specs: ArgSpec, **params):
   _, arg_devices = util.unzip2(arg_specs)
   donated_invars = (False,) * len(arg_specs)
-  if config.jax_array:
-    # This will be resolved in sharded_lowering.
-    device = None
-  else:
-    device = _device_from_arg_devices(arg_devices)
+  device = None if config.jax_array else _device_from_arg_devices(arg_devices)
   def prim_fun(*args):
     out = prim.bind(*args, **params)
-    if prim.multiple_results:
-      return out
-    else:
-      return out,
+    return out if prim.multiple_results else (out, )
+
   compiled = _xla_callable_uncached(lu.wrap_init(prim_fun), device, None,
                                     prim.name, donated_invars, False, *arg_specs)
-  if not prim.multiple_results:
-    return lambda *args, **kw: compiled(*args, **kw)[0]
-  else:
-    return compiled
+  return (compiled if prim.multiple_results else
+          (lambda *args, **kw: compiled(*args, **kw)[0]))
 
 
 def _device_from_arg_devices(devices: Sequence[Optional[Device]]) -> Optional[Device]:
@@ -234,10 +225,9 @@ def _xla_call_impl_lazy(fun: lu.WrappedFun, *args, device, backend, name,
   del inline  # Only used at tracing time
   if fun.in_type is None:
     arg_specs: Iterable[Any] = unsafe_map(arg_spec, args)
+  elif config.jax_array:
+    raise NotImplementedError('Dynamic shapes do not work with Array.')
   else:
-    # fun.in_type is used for dynamic shapes.
-    if config.jax_array:
-      raise NotImplementedError('Dynamic shapes do not work with Array.')
     arg_specs = [(None, getattr(x, '_device', None)) for x in args]
   return xla_callable(fun, device, backend, name, donated_invars, keep_unused,
                       *arg_specs)
@@ -311,8 +301,9 @@ def not_none_device_or_backend_on_jit(backend, device, num_ins):
   # TODO(yashkatariya): Remove this entire function when backend and device are
   # removed as arguments on jit.
   if device is not None and backend is not None:
-    raise ValueError("can't specify both a device and a backend for jit, "
-                     "got device={} and backend={}".format(device, backend))
+    raise ValueError(
+        f"can't specify both a device and a backend for jit, got device={device} and backend={backend}"
+    )
 
   if backend is not None:
     da = [xb.get_backend(backend).get_default_device_assignment(1)[0]]
@@ -349,14 +340,13 @@ def sharded_lowering(fun, device, backend, name, donated_invars, always_lower,
 
 def _xla_callable_uncached(fun: lu.WrappedFun, device, backend, name,
                            donated_invars, keep_unused, *arg_specs):
-  if config.jax_array:
-    computation = sharded_lowering(fun, device, backend, name, donated_invars,
-                                   False, keep_unused, *arg_specs)
-    allow_prop = [True] * len(computation.compile_args['global_out_avals'])
-    return computation.compile(_allow_propagation_to_outputs=allow_prop).unsafe_call
-  else:
+  if not config.jax_array:
     return lower_xla_callable(fun, device, backend, name, donated_invars, False,
                               keep_unused, *arg_specs).compile().unsafe_call
+  computation = sharded_lowering(fun, device, backend, name, donated_invars,
+                                 False, keep_unused, *arg_specs)
+  allow_prop = [True] * len(computation.compile_args['global_out_avals'])
+  return computation.compile(_allow_propagation_to_outputs=allow_prop).unsafe_call
 
 xla_callable = lu.cache(_xla_callable_uncached)
 
@@ -385,10 +375,7 @@ def should_tuple_args(num_args: int, platform: str):
   # CPU and GPU do not need tuples as they use host-side data structures that
   # do not have small bounds.
   # TPU only needs a tuple for very long lists
-  if platform == "tpu":
-    return num_args > 2000
-  else:
-    return False
+  return num_args > 2000 if platform == "tpu" else False
 
 
 def raise_warnings_or_errors_for_jit_of_pmap(nreps, backend, name, jaxpr):
@@ -428,8 +415,9 @@ def lower_xla_callable(
       underlying executable. If `True`, unused arguments will not be pruned.
   """
   if device is not None and backend is not None:
-    raise ValueError("can't specify both a device and a backend for jit, "
-                     "got device={} and backend={}".format(device, backend))
+    raise ValueError(
+        f"can't specify both a device and a backend for jit, got device={device} and backend={backend}"
+    )
   abstract_args, arg_devices = util.unzip2(arg_specs)
   if fun.in_type is None:
     # Add an annotation inferred from the arguments; no dynamic axes here.
@@ -480,8 +468,8 @@ def lower_xla_callable(
   # Computations that only produce constants and/or only rearrange their inputs,
   # which are often produced from partial evaluation, don't need compilation,
   # and don't need to evaluate their arguments.
-  if (not always_lower and not (jaxpr.effects or has_outfeed) and
-      (not jaxpr.eqns and all(kept_outputs) or not jaxpr.outvars)):
+  if (not always_lower and not jaxpr.effects and not has_outfeed
+      and (not jaxpr.eqns and all(kept_outputs) or not jaxpr.outvars)):
     return XlaComputation(
         name, None, True, None, None, None, jaxpr=jaxpr, consts=consts,
         device=device, in_avals=abstract_args, out_avals=out_avals,
@@ -549,10 +537,9 @@ def jaxpr_has_primitive(jaxpr, prim_name: str):
   for eqn in jaxpr.eqns:
     if prim_name in eqn.primitive.name:
       return True
-  for subjaxpr in core.subjaxprs(jaxpr):
-    if jaxpr_has_primitive(subjaxpr, prim_name):
-      return True
-  return False
+  return any(
+      jaxpr_has_primitive(subjaxpr, prim_name)
+      for subjaxpr in core.subjaxprs(jaxpr))
 
 
 class SourceInfo(NamedTuple):
@@ -618,10 +605,7 @@ def _prune_unused_inputs(
 # remove it once we bring the id_tap implementation into the core.
 outfeed_rewriter: Optional[Callable[[core.Jaxpr], core.Jaxpr]] = None
 def apply_outfeed_rewriter(jaxpr: core.Jaxpr) -> core.Jaxpr:
-  if outfeed_rewriter is not None:
-    return outfeed_rewriter(jaxpr)
-  else:
-    return jaxpr
+  return outfeed_rewriter(jaxpr) if outfeed_rewriter is not None else jaxpr
 
 
 # TODO(mattjj,necula): this duplicates code in core.valid_jaxtype, but one
@@ -653,8 +637,7 @@ def jaxpr_replicas(jaxpr) -> int:
 # TODO(mattjj): this function assumes that only pmap has a parameter named
 # axis_size, and that it corresponds to cross-replica mapping
 def eqn_replicas(eqn):
-  call_jaxpr = eqn.params.get("call_jaxpr")
-  if call_jaxpr:
+  if call_jaxpr := eqn.params.get("call_jaxpr"):
     return eqn.params.get('axis_size', 1) * jaxpr_replicas(call_jaxpr)
   elif eqn.primitive in xla.initial_style_primitives:
     return initial_style_primitive_replicas(eqn.params)
@@ -682,10 +665,7 @@ def _xla_callable_device(nreps, backend, device,
       return xb.get_backend(backend).get_default_device_assignment(1)[0]
 
     arg_device = _device_from_arg_devices(arg_devices)
-    if arg_device is not None:
-      return arg_device
-
-    return config.jax_default_device
+    return arg_device if arg_device is not None else config.jax_default_device
 
 
 # Argument and result handlers
@@ -854,13 +834,13 @@ def _dynamic_array_result_handler(sticky_device, aval, env, buf):
     return core.DArray(aval.update(shape=tuple(shape)), data)
 
 
-result_handlers: Dict[
-    Type[core.AbstractValue],
-    Callable[[Optional[Device], Any], ResultHandler]] = {}
-result_handlers[core.AbstractToken] = lambda _, __: lambda _, __: core.token
-result_handlers[core.ShapedArray] = array_result_handler
-result_handlers[core.DShapedArray] = dynamic_array_result_handler
-result_handlers[core.ConcreteArray] = array_result_handler
+result_handlers: Dict[Type[
+    core.AbstractValue], Callable[[Optional[Device], Any], ResultHandler]] = {
+        core.AbstractToken: lambda _, __: lambda _, __: core.token,
+        core.ShapedArray: array_result_handler,
+        core.DShapedArray: dynamic_array_result_handler,
+        core.ConcreteArray: array_result_handler,
+    }
 
 
 def needs_check_special():
@@ -996,18 +976,16 @@ class XlaComputation(stages.XlaLowering):
   def mhlo(self) -> ir.Module:
     if use_stablehlo:
       return super().mhlo()
-    else:
-      if self.is_trivial():
-        raise ValueError("A trivial computation has no MHLO")
-      return self._hlo
+    if self.is_trivial():
+      raise ValueError("A trivial computation has no MHLO")
+    return self._hlo
 
   def stablehlo(self) -> ir.Module:
-    if use_stablehlo:
-      if self.is_trivial():
-        raise ValueError("A trivial computation has no StableHLO")
-      return self._hlo
-    else:
+    if not use_stablehlo:
       return super().stablehlo()
+    if self.is_trivial():
+      raise ValueError("A trivial computation has no StableHLO")
+    return self._hlo
 
   def compile(self) -> XlaCompiledComputation:
     if self._executable is None:
@@ -1129,8 +1107,7 @@ def _cache_write(serialized_computation: Union[str, bytes, ir.Module],
         "callbacks (e.g. from jax.debug.print or breakpoint)")
     return
 
-  min_compile_time = config.jax_persistent_cache_min_compile_time_secs
-  if min_compile_time:
+  if min_compile_time := config.jax_persistent_cache_min_compile_time_secs:
     if compile_time_secs < min_compile_time:
       logger.info(
           "Not writing persistent cache entry for '%s' because it took < %.2f "
@@ -1208,7 +1185,7 @@ class XlaCompiledComputation(stages.XlaExecutable):
                                   keepalive)
 
   def is_trivial(self):
-    return self._xla_executable == None
+    return self._xla_executable is None
 
   @property
   def xla_executable(self):
@@ -1289,10 +1266,11 @@ def _device_put_token(_, device):
 
 _scalar_types = dtypes.python_scalar_dtypes.keys()
 
-device_put_handlers: Dict[Any, Callable[[Any, Optional[Device]],
-                                        Tuple[Any, ...]]] = {}
-device_put_handlers[np.ma.MaskedArray] = _device_put_masked_array
-device_put_handlers.update((t, _device_put_array) for t in array_types)
+device_put_handlers: Dict[
+    Any, Callable[[Any, Optional[Device]], Tuple[Any, ...]]] = {
+        np.ma.MaskedArray: _device_put_masked_array
+    }
+device_put_handlers |= ((t, _device_put_array) for t in array_types)
 device_put_handlers.update((t, _device_put_scalar) for t in _scalar_types)
 device_put_handlers[core.Token] = _device_put_token
 
@@ -1304,15 +1282,13 @@ for t in device_array.device_array_types:
   device_put_handlers[t] = _device_put_device_array
 
 def _device_put_jax_array(x, device: Optional[Device]):
-  if is_single_device_sharding(x.sharding):
-    if xla_extension_version >= 128:
-      return (_copy_array_to_device(x, device),)
-    else:
-      x = _copy_device_array_to_device(_set_aval(x._arrays[0]), device)
-      return (x,)
-  else:
+  if not is_single_device_sharding(x.sharding):
     # Round trip via host if x is sharded. SDA also does a round trip via host.
     return _device_put_array(x._value, device)
+  if xla_extension_version >= 128:
+    return (_copy_array_to_device(x, device),)
+  x = _copy_device_array_to_device(_set_aval(x._arrays[0]), device)
+  return (x,)
 device_put_handlers[array.ArrayImpl] = _device_put_jax_array
 
 device_put_handlers[pxla._ShardedDeviceArray] = _device_put_array

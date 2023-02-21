@@ -125,20 +125,20 @@ def _find_arg_mismatch(arg_list, fails, fun_name):
   first_err, second_err = fails
   mismatched_args_msg = []
   for name, inp_da, aval in arg_list:
-    if first_err.m_type == pxla.MismatchType.ARG_SHARDING:
-      if first_err.da == inp_da:
-        mismatched_args_msg.append(
-            (f"argument {name} of {fun_name} with shape {aval.str_short()} and "
-             f"{first_err._dev_ids_plat_str}"))
-        break
+    if (first_err.m_type == pxla.MismatchType.ARG_SHARDING
+        and first_err.da == inp_da):
+      mismatched_args_msg.append(
+          (f"argument {name} of {fun_name} with shape {aval.str_short()} and "
+           f"{first_err._dev_ids_plat_str}"))
+      break
 
   for name, inp_da, aval in arg_list:
-    if second_err.m_type == pxla.MismatchType.ARG_SHARDING:
-      if second_err.da == inp_da:
-        mismatched_args_msg.append(
-            (f"argument {name} of {fun_name} with shape {aval.str_short()} and "
-             f"{second_err._dev_ids_plat_str}"))
-        break
+    if (second_err.m_type == pxla.MismatchType.ARG_SHARDING
+        and second_err.da == inp_da):
+      mismatched_args_msg.append(
+          (f"argument {name} of {fun_name} with shape {aval.str_short()} and "
+           f"{second_err._dev_ids_plat_str}"))
+      break
   return mismatched_args_msg
 
 
@@ -172,8 +172,7 @@ def _device_assignment_mismatch_error(fun, fails, in_tree, args_flat, api_name):
   else:
     first, second = fails
     extra_msg = f" Got{first._str(api_name)} and{second._str(api_name)}"
-  msg = (f"Received incompatible devices for {api_name}ted computation.{extra_msg}")
-  return msg
+  return f"Received incompatible devices for {api_name}ted computation.{extra_msg}"
 
 
 def _python_pjit_helper(fun, infer_params_fn, *args, **kwargs):
@@ -294,15 +293,10 @@ def _resolve_axis_resources_and_shardings_arg(
         'Setting both out_shardings and out_axis_resources is not '
         'allowed. out_axis_resources is deprecated. Please use out_shardings.')
 
-  if not _is_unspecified(in_axis_resources):
-    final_in_shardings = in_axis_resources
-  else:
-    final_in_shardings = in_shardings
-
-  if not _is_unspecified(out_axis_resources):
-    final_out_shardings = out_axis_resources
-  else:
-    final_out_shardings = out_shardings
+  final_in_shardings = (in_shardings if _is_unspecified(in_axis_resources) else
+                        in_axis_resources)
+  final_out_shardings = (out_shardings if _is_unspecified(out_axis_resources)
+                         else out_axis_resources)
   return final_in_shardings, final_out_shardings
 
 
@@ -312,7 +306,7 @@ def pre_infer_params(fun, in_shardings, out_shardings,
   # TODO(yashkatariya, mattjj): Remove when pjit supports dynamic shapes.
   if jax.config.jax_dynamic_shapes:
     raise ValueError("Dynamic shapes is not supported with pjit yet.")
-  if abstracted_axes and not jax.config.jax_dynamic_shapes:
+  if abstracted_axes:
     raise ValueError("abstracted_axes must be used with --jax_dynamic_shapes")
 
   check_callable(fun)
@@ -436,14 +430,9 @@ def common_infer_params(pjit_info_args, *args, **kwargs):
 
   if resource_env is not None:
     pjit_mesh = resource_env.physical_mesh
-    if pjit_mesh.empty:
-      if jax.config.jax_array:
-        # Don't enforce requiring a mesh when `jax_array` flag is enabled. But
-        # if mesh is not empty then pjit will respect it.
-        pass
-      else:
-        raise RuntimeError("pjit requires a non-empty mesh! Are you sure that "
-                            "it's defined at the call site?")
+    if pjit_mesh.empty and not jax.config.jax_array:
+      raise RuntimeError("pjit requires a non-empty mesh! Are you sure that "
+                          "it's defined at the call site?")
   else:
     pjit_mesh = None
 
@@ -830,8 +819,7 @@ def flatten_axis_resources(what, tree, shardings, tupled_args):
   # Because ecause we only have the `tree` treedef and not the full pytree here,
   # we construct a dummy tree to compare against. Revise this in callers?
   dummy_tree = tree_unflatten(tree, [PytreeLeaf()] * tree.num_leaves)
-  errors = prefix_errors(axis_tree, dummy_tree)
-  if errors:
+  if errors := prefix_errors(axis_tree, dummy_tree):
     e = errors[0]  # Only show information about the first disagreement found.
     raise e(what)
 
@@ -960,11 +948,10 @@ def _check_and_canonicalize_out_shardings(
   pjit_check_aval_sharding(out_shardings_flat, global_out_avals, "pjit outputs",
                            allow_uneven_sharding=False)
 
-  canonicalized_out_shardings_flat = tuple(
-      o if _is_unspecified(o) or is_auto(o) else to_gspmd_sharding(o, aval.ndim)
-      for o, aval in safe_zip(out_shardings_flat, global_out_avals)
-  )
-  return canonicalized_out_shardings_flat
+  return tuple(
+      o if _is_unspecified(o) or is_auto(o) else to_gspmd_sharding(
+          o, aval.ndim)
+      for o, aval in safe_zip(out_shardings_flat, global_out_avals))
 
 
 def _pjit_jaxpr(fun, out_shardings_thunk, global_in_avals, out_tree, api_name):
@@ -1034,13 +1021,11 @@ class ParsedPartitionSpec:
     return self.unsynced_user_spec(SpecSync.IN_SYNC)
 
   def get_partition_spec(self) -> PartitionSpec:
-    if self.sync < SpecSync.IN_SYNC:
-      return _get_single_pspec(self)
+    if self.sync >= SpecSync.IN_SYNC and isinstance(self.unsafe_user_spec,
+                                                    PartitionSpec):
+      return self.unsafe_user_spec
     else:
-      if isinstance(self.unsafe_user_spec, PartitionSpec):
-        return self.unsafe_user_spec
-      else:
-        return _get_single_pspec(self)
+      return _get_single_pspec(self)
 
   def unsynced_user_spec(self, min_sync):
     if self.sync < min_sync:
@@ -1173,8 +1158,7 @@ def _check_unique_resources(axis_resources, arg_name):
     resource_counts = Counter(it.chain.from_iterable(constrained_dims))
     if not resource_counts: continue
     if resource_counts.most_common(1)[0][1] > 1:
-      multiple_uses = [r for r, c in resource_counts.items() if c > 1]
-      if multiple_uses:
+      if multiple_uses := [r for r, c in resource_counts.items() if c > 1]:
         raise ValueError(f"A single {arg_name} specification can map every mesh axis "
                          f"to at most one positional dimension, but {arg_axis_resources.user_spec} "
                          f"has duplicate entries for {pxla.show_axes(multiple_uses)}")
@@ -1227,20 +1211,15 @@ def _resolve_in_shardings(
     if _is_unspecified(pjit_in_s):
       if _is_unspecified(arg_s):
         resolved_in_shardings.append(arg_s)
+      elif (committed and isinstance(arg_s, PmapSharding)
+            or not committed and dispatch.is_single_device_sharding(arg_s)):
+        resolved_in_shardings.append(_UNSPECIFIED)
+      elif committed:
+        resolved_in_shardings.append(to_gspmd_sharding(
+            cast(XLACompatibleSharding, arg_s), arg.ndim))
       else:
-        if committed:
-          # If the arg has a PmapSharding, then reshard it unconditionally.
-          if isinstance(arg_s, PmapSharding):
-            resolved_in_shardings.append(_UNSPECIFIED)
-          else:
-            resolved_in_shardings.append(to_gspmd_sharding(
-                cast(XLACompatibleSharding, arg_s), arg.ndim))
-        else:
-          if dispatch.is_single_device_sharding(arg_s):
-            resolved_in_shardings.append(_UNSPECIFIED)
-          else:
-            raise NotImplementedError('Having uncommitted Array sharded on '
-                                      'multiple devices is not supported.')
+        raise NotImplementedError('Having uncommitted Array sharded on '
+                                  'multiple devices is not supported.')
     else:
       if isinstance(arg, np.ndarray) and not pxla.is_op_sharding_replicated(
           pjit_in_s._to_xla_op_sharding(arg.ndim)) and xb.process_count() > 1:  # type: ignore
@@ -1257,18 +1236,17 @@ def _resolve_in_shardings(
             'Please see the jax.Array migration guide for more information '
             'https://jax.readthedocs.io/en/latest/jax_array_migration.html#handling-of-host-local-inputs-to-pjit-like-batch-etc. '
             f'Got arg shape: {arg.shape}, arg value: {arg}')
-      if not _is_unspecified(arg_s):
-        if (committed and
-            not isinstance(arg_s, PmapSharding) and
-            not pxla.are_op_shardings_equal(
-                pjit_in_s._to_xla_op_sharding(arg.ndim),  # type: ignore
-                arg_s._to_xla_op_sharding(arg.ndim))):
-          op =  getattr(pjit_in_s, '_original_sharding', pjit_in_s)
-          raise ValueError('Sharding passed to pjit does not match the sharding '
-                           'on the respective arg. '
-                           f'Got pjit sharding: {op},\n'
-                           f'arg sharding: {arg_s} for arg shape: {arg.shape}, '
-                           f'arg value: {arg}')
+      if not _is_unspecified(arg_s) and (committed and not isinstance(
+          arg_s, PmapSharding) and not pxla.are_op_shardings_equal(
+              pjit_in_s._to_xla_op_sharding(arg.ndim),  # type: ignore
+              arg_s._to_xla_op_sharding(arg.ndim),
+          )):
+        op =  getattr(pjit_in_s, '_original_sharding', pjit_in_s)
+        raise ValueError('Sharding passed to pjit does not match the sharding '
+                         'on the respective arg. '
+                         f'Got pjit sharding: {op},\n'
+                         f'arg sharding: {arg_s} for arg shape: {arg.shape}, '
+                         f'arg value: {arg}')
       resolved_in_shardings.append(pjit_in_s)
 
   return tuple(resolved_in_shardings)
@@ -1361,13 +1339,13 @@ class SameDeviceAssignmentTuple:
       return hash((shardings_hash, *self.device_assignment))
 
   def __eq__(self, other):
-    if not isinstance(other, SameDeviceAssignmentTuple):
-      return False
-    return (all(pxla.are_op_shardings_equal(s._op_sharding, o._op_sharding)  # pytype: disable=attribute-error
-                if isinstance(s, GSPMDSharding) and isinstance(o, GSPMDSharding)
-                else s == o
-                for s, o in safe_zip(self.shardings, other.shardings)) and
-            self.device_assignment == other.device_assignment)
+    return ((
+        all(
+            pxla.are_op_shardings_equal(s._op_sharding, o._op_sharding)  # pytype: disable=attribute-error
+            if isinstance(s, GSPMDSharding) and isinstance(o, GSPMDSharding) else
+            s == o for s, o in safe_zip(self.shardings, other.shardings))
+        and self.device_assignment == other.device_assignment) if isinstance(
+            other, SameDeviceAssignmentTuple) else False)
 
 
 def _pjit_lower(
@@ -1452,21 +1430,19 @@ def _pjit_lower_cached(
 
 
 def pjit_staging_rule(trace, *args, **params):
-  if (params["inline"] and
-      all(_is_unspecified(i) for i in params["in_shardings"]) and
-      all(_is_unspecified(o) for o in params["out_shardings"])):
-    jaxpr = params['jaxpr']
-    return core.eval_jaxpr(jaxpr.jaxpr, jaxpr.consts, *args)
-  else:
+  if (not params["inline"]
+      or not all(_is_unspecified(i) for i in params["in_shardings"])
+      or not all(_is_unspecified(o) for o in params["out_shardings"])):
     return trace.default_process_primitive(pjit_p, args, params)
+  jaxpr = params['jaxpr']
+  return core.eval_jaxpr(jaxpr.jaxpr, jaxpr.consts, *args)
 
 pe.custom_staging_rules[pjit_p] = pjit_staging_rule
 
 
 def _pjit_abstract_eval(*args, jaxpr, out_shardings, resource_env,
                         out_positional_semantics, **_):
-  disallowed_effects = mlir.lowerable_effects.filter_not_in(jaxpr.effects)
-  if disallowed_effects:
+  if disallowed_effects := mlir.lowerable_effects.filter_not_in(jaxpr.effects):
     raise ValueError(f'Effects not supported in `pjit`: {disallowed_effects}.')
   if config.jax_array:
     return jaxpr.out_avals, jaxpr.effects
@@ -1479,10 +1455,11 @@ def _pjit_lowering(ctx, *args, name, jaxpr, in_shardings,
                    out_shardings, resource_env, donated_invars,
                    in_positional_semantics, out_positional_semantics,
                    keep_unused, inline):
-  if not config.jax_jit_pjit_api_merge:
-    if not isinstance(ctx.module_context.axis_context,
-                      (mlir.SPMDAxisContext, mlir.ShardingContext)):
-      raise RuntimeError("Nesting pjit() inside jit() is not allowed.")
+  if not config.jax_jit_pjit_api_merge and not isinstance(
+      ctx.module_context.axis_context,
+      (mlir.SPMDAxisContext, mlir.ShardingContext),
+  ):
+    raise RuntimeError("Nesting pjit() inside jit() is not allowed.")
 
   effects = ctx.tokens_in.effects()
   output_types = safe_map(mlir.aval_to_ir_types, ctx.avals_out)
@@ -1528,11 +1505,7 @@ def _pjit_batcher(insert_axis, spmd_axis_name,
   new_parts = (axis_name,) if insert_axis else (
       () if spmd_axis_name is None else spmd_axis_name)
 
-  if resource_env is not None:
-    mesh = resource_env.physical_mesh
-  else:
-    mesh = None
-
+  mesh = resource_env.physical_mesh if resource_env is not None else None
   in_shardings = tuple(
       _pjit_batcher_for_sharding(i, axis_in, new_parts, mesh, aval.ndim)
       if axis_in is not None else i
@@ -1779,10 +1752,7 @@ def _pjit_partial_eval_custom_params_updater(
   in_shardings_known, _ = pe.partition_list(unks_in, params_known['in_shardings'])
   in_positional_semantics_known, _ = pe.partition_list(
       unks_in, params_known['in_positional_semantics'])
-  if num_res == 0:
-    residual_shardings = []
-  else:
-    residual_shardings = [_UNSPECIFIED] * num_res
+  residual_shardings = [] if num_res == 0 else [_UNSPECIFIED] * num_res
   _, out_shardings_known = pe.partition_list(kept_outs_known, params_known['out_shardings'])
   new_params_known = dict(params_known,
                           in_shardings=tuple(in_shardings_known),
@@ -1905,12 +1875,11 @@ def dce_jaxpr_pjit_rule(used_outputs: List[bool], eqn: core.JaxprEqn
   )
   if not any(used_inputs) and not any(used_outputs) and not dced_jaxpr.effects:
     return used_inputs, None
-  else:
-    new_eqn = core.new_jaxpr_eqn(
-        [v for v, used in zip(eqn.invars, used_inputs) if used],
-        [v for v, used in zip(eqn.outvars, used_outputs) if used],
-        eqn.primitive, new_params, dced_jaxpr.effects, eqn.source_info)
-    return used_inputs, new_eqn
+  new_eqn = core.new_jaxpr_eqn(
+      [v for v, used in zip(eqn.invars, used_inputs) if used],
+      [v for v, used in zip(eqn.outvars, used_outputs) if used],
+      eqn.primitive, new_params, dced_jaxpr.effects, eqn.source_info)
+  return used_inputs, new_eqn
 
 pe.dce_rules[pjit_p] = dce_jaxpr_pjit_rule
 
@@ -1920,8 +1889,7 @@ def _check_resources_against_named_axes(what, aval, pos_axis_resources, named_ax
       it.chain.from_iterable([d for d in pos_axis_resources if d is not None]))
   aval_resources = set(it.chain.from_iterable(
     named_axis_resources[a] for a in aval.named_shape))
-  overlap = pjit_resources & aval_resources
-  if overlap:
+  if overlap := pjit_resources & aval_resources:
     raise JAXTypeError(
         f"{what} has an axis resources specification of "
         f"{pos_axis_resources.unsynced_user_spec(SpecSync.DIM_PERMUTE)} "
@@ -1942,12 +1910,11 @@ def _resource_typing_pjit(avals, params, source_info, resource_env, named_axis_r
     elif hasattr(s, '_original_sharding') and hasattr(
         s._original_sharding, '_parsed_pspec'):
       parsed_pspec = s._original_sharding._parsed_pspec
+    elif resource_env is None:
+      parsed_pspec = None
     else:
-      if resource_env is not None:
-        parsed_pspec = parse_flatten_op_sharding(
-            s._op_sharding, resource_env.physical_mesh)[0]
-      else:
-        parsed_pspec = None
+      parsed_pspec = parse_flatten_op_sharding(
+          s._op_sharding, resource_env.physical_mesh)[0]
     if parsed_pspec is not None:
       _check_resources_against_named_axes(what, aval, parsed_pspec,
                                           named_axis_resources)
@@ -1964,12 +1931,11 @@ def _resource_typing_pjit(avals, params, source_info, resource_env, named_axis_r
     elif hasattr(s, '_original_sharding') and hasattr(
         s._original_sharding, '_parsed_pspec'):
       parsed_pspec = s._original_sharding._parsed_pspec
+    elif resource_env is None:
+      parsed_pspec = None
     else:
-      if resource_env is not None:
-        parsed_pspec = parse_flatten_op_sharding(
-            s._op_sharding, resource_env.physical_mesh)[0]
-      else:
-        parsed_pspec = None
+      parsed_pspec = parse_flatten_op_sharding(
+          s._op_sharding, resource_env.physical_mesh)[0]
     if parsed_pspec is not None:
       _check_resources_against_named_axes(what, aval, parsed_pspec,
                                           named_axis_resources)
@@ -2013,11 +1979,7 @@ def _resolve_wsc_args(axis_resources, shardings):
         'Please specify the shardings argument with a concrete sharding. Note '
         'that axis_resources is deprecated, so use the shardings argument.')
 
-  if not _is_unspecified(axis_resources):
-    final_shardings = axis_resources
-  else:
-    final_shardings = shardings
-  return final_shardings
+  return shardings if _is_unspecified(axis_resources) else axis_resources
 
 
 # TODO(yashkatariya): Remove the axis_resources argument and make the signature
@@ -2400,13 +2362,12 @@ def parse_flatten_op_sharding(op_sharding: xc.OpSharding,
 
 
 def _get_op_sharding(op_sharding) -> Sequence[xc.OpSharding]:
-  if op_sharding.type == xc.OpSharding.Type.TUPLE:
-    out: List[xc.OpSharding] = []
-    for s in op_sharding.tuple_shardings:
-      out.extend(_get_op_sharding(s))
-    return out
-  else:
+  if op_sharding.type != xc.OpSharding.Type.TUPLE:
     return [op_sharding]
+  out: List[xc.OpSharding] = []
+  for s in op_sharding.tuple_shardings:
+    out.extend(_get_op_sharding(s))
+  return out
 
 
 _get_single_pspec = lambda p: pxla.array_mapping_to_axis_resources(

@@ -245,7 +245,7 @@ class PartitionSpec(tuple):
     return tuple.__new__(PartitionSpec, partitions)
 
   def __repr__(self):
-    return "PartitionSpec%s" % tuple.__repr__(self)
+    return f"PartitionSpec{tuple.__repr__(self)}"
 
   def __reduce__(self):
     return (PartitionSpec, tuple(self))
@@ -413,9 +413,7 @@ class SingleDeviceSharding(XLACompatibleSharding):
   def __eq__(self, other):
     if not isinstance(other, SingleDeviceSharding):
       return False
-    if id(self) == id(other):
-      return True
-    return self._device == other._device
+    return True if id(self) == id(other) else self._device == other._device
 
   @property
   def device_set(self) -> Set[Device]:
@@ -517,11 +515,11 @@ class PmapSharding(XLACompatibleSharding):
 
   @functools.lru_cache(maxsize=4096)
   def shard_shape(self, global_shape: Shape) -> Shape:
-    sharded_dim = None
-    for i, s in enumerate(self.sharding_spec.sharding):
-      if isinstance(s, pxla.Unstacked):
-        sharded_dim = i
-        break
+    sharded_dim = next(
+        (i for i, s in enumerate(self.sharding_spec.sharding)
+         if isinstance(s, pxla.Unstacked)),
+        None,
+    )
     if sharded_dim is None:
       return global_shape
     return global_shape[:sharded_dim] + global_shape[sharded_dim+1:]
@@ -551,8 +549,8 @@ class PositionalSharding(XLACompatibleSharding):
     platform_name = self._devices[0].platform.upper()
     for idx, x in np.ndenumerate(ids):
       ids[idx] = DeviceIdSet(platform_name, *(self._devices[i].id for i in x))
-    body = np.array2string(ids, prefix=cls_name + '(', suffix=')',
-                           max_line_width=100)
+    body = np.array2string(
+        ids, prefix=f'{cls_name}(', suffix=')', max_line_width=100)
     return f'{cls_name}({body})'
 
   def reshape(self, *shape):

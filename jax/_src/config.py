@@ -84,8 +84,7 @@ class Config:
       raise Exception(f"Unrecognized config option: {name}")
     self.values[name] = val
 
-    hook = self._update_hooks.get(name, None)
-    if hook:
+    if hook := self._update_hooks.get(name, None):
       hook(val)
 
   def read(self, name):
@@ -234,7 +233,7 @@ class Config:
     """
     name = name.lower()
     if upgrade:
-      help += ' ' + UPGRADE_BOOL_HELP
+      help += f' {UPGRADE_BOOL_HELP}'
       extra_description += UPGRADE_BOOL_EXTRA_DESC
     self.DEFINE_bool(name, bool_env(name.upper(), default), help,
                      update_hook=update_global_hook)
@@ -243,6 +242,7 @@ class Config:
     def get_state(self):
       val = _thread_local_state.__dict__.get(name, unset)
       return val if val is not unset else self._read(name)
+
     setattr(Config, name, property(get_state))
 
     return _StateContextManager(name, help, update_thread_local_hook,
