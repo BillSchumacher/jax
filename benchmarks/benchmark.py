@@ -56,10 +56,7 @@ def benchmark(f: Callable[[], Any], iters: Optional[int] = None,
     target_total_secs = int(os.getenv("TARGET_TOTAL_SECS", "10"))
 
   if warmup is None:
-    if iters is None:
-      warmup = 1
-    else:
-      warmup = np.clip(1, iters // 10, 10)
+    warmup = 1 if iters is None else np.clip(1, iters // 10, 10)
   for _ in range(warmup):
     f()
 
@@ -74,7 +71,7 @@ def benchmark(f: Callable[[], Any], iters: Optional[int] = None,
     count += 1
 
   times_arr = np.array(times)
-  print("---------Benchmark results for %s---------" % (name or f.__name__))
+  print(f"---------Benchmark results for {name or f.__name__}---------")
   print(f"mean={times_arr.mean()} std={times_arr.std()} "
         f"%%std={_pstd(times_arr)} total={times_arr.sum()}")
   print("#iters=%d #warmup=%d" % (count, warmup))
@@ -120,7 +117,7 @@ def benchmark_suite(prepare: Callable[..., Callable], params_list: List[Dict],
     for idx, mean in enumerate(means):
       data[idx].append(data[idx][mean_idx] / mean)
 
-  print("---------Benchmark summary for %s---------" % name)
+  print(f"---------Benchmark summary for {name}---------")
   print(tabulate(data, data_header))
   print()
 
@@ -132,9 +129,9 @@ def benchmark_suite(prepare: Callable[..., Callable], params_list: List[Dict],
 
 def _get_baseline_means(baseline_dir, name):
   baseline_dir = os.path.expanduser(baseline_dir)
-  filename = os.path.join(baseline_dir, name + ".csv")
+  filename = os.path.join(baseline_dir, f"{name}.csv")
   if not os.path.exists(filename):
-    raise FileNotFoundError("Can't find baseline file: %s" % filename)
+    raise FileNotFoundError(f"Can't find baseline file: {filename}")
   with open(filename, newline="") as csvfile:
     reader = csv.reader(csvfile)
     header = next(reader)
@@ -146,7 +143,7 @@ def _export_results(data_header, data, export_dir, name):
   assert "mean" in data_header # For future comparisons via _get_baseline_means
   export_dir = os.path.expanduser(export_dir)
   os.makedirs(export_dir, exist_ok=True)
-  filename = os.path.join(export_dir, name + ".csv")
+  filename = os.path.join(export_dir, f"{name}.csv")
   with open(filename, "w", newline="") as csvfile:
     writer = csv.writer(csvfile)
     writer.writerow(data_header)
@@ -155,9 +152,7 @@ def _export_results(data_header, data, export_dir, name):
 
 
 def _param_str(param):
-  if callable(param):
-    return param.__name__
-  return str(param)
+  return param.__name__ if callable(param) else str(param)
 
 
 def _pstd(x):

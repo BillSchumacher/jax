@@ -34,12 +34,8 @@ def _make_1d_grid_from_slice(s: slice, op_name: str) -> Array:
                                 f"slice stop of jnp.{op_name}")
   step = core.concrete_or_error(None, s.step,
                                 f"slice step of jnp.{op_name}") or 1
-  if np.iscomplex(step):
-    newobj = jnp.linspace(start, stop, int(abs(step)))
-  else:
-    newobj = jnp.arange(start, stop, step)
-
-  return newobj
+  return (jnp.linspace(start, stop, int(abs(step)))
+          if np.iscomplex(step) else jnp.arange(start, stop, step))
 
 
 class _IndexGrid(abc.ABC):
@@ -56,9 +52,7 @@ class _IndexGrid(abc.ABC):
     output_arr = jnp.meshgrid(*output, indexing='ij', sparse=self.sparse)
     if self.sparse:
       return output_arr
-    if len(output_arr) == 0:
-      return jnp.arange(0)
-    return jnp.stack(output_arr, 0)
+    return jnp.arange(0) if len(output_arr) == 0 else jnp.stack(output_arr, 0)
 
 
 class _Mgrid(_IndexGrid):

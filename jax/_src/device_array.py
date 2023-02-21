@@ -207,7 +207,7 @@ for device_array in [DeviceArray]:
 
   def __repr__(self):
     line_width = np.get_printoptions()["linewidth"]
-    prefix = '{}('.format(self.__class__.__name__.lstrip('_'))
+    prefix = f"{self.__class__.__name__.lstrip('_')}("
     s = np.array2string(self._value, prefix=prefix, suffix=',',
                         separator=', ', max_line_width=line_width)
     if self.aval is not None and self.aval.weak_type:

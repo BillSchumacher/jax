@@ -41,8 +41,8 @@ def to_dlpack(x: device_array.DeviceArrayProtocol, take_ownership: bool = False)
       owns.
   """
   if not isinstance(x, (device_array.DeviceArray, array.ArrayImpl)):
-    raise TypeError("Argument to to_dlpack must be a DeviceArray or Array, got {}"
-                    .format(type(x)))
+    raise TypeError(
+        f"Argument to to_dlpack must be a DeviceArray or Array, got {type(x)}")
   if isinstance(x, array.ArrayImpl):
     assert len(x._arrays) == 1
     buf = x._arrays[0]

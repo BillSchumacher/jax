@@ -52,8 +52,7 @@ def _get_sharding_spec(global_shape, global_mesh, mesh_axes):
 def _get_indices(global_shape: Shape, global_mesh: pxla.Mesh,
                  mesh_axes: MeshAxes) -> Tuple[Index, ...]:
   sharding_spec = _get_sharding_spec(global_shape, global_mesh, mesh_axes)
-  indices = pxla.spec_to_indices(global_shape, sharding_spec)
-  return indices  # type: ignore
+  return pxla.spec_to_indices(global_shape, sharding_spec)
 
 
 @functools.lru_cache(maxsize=4096)
@@ -61,9 +60,7 @@ def get_shard_indices(global_shape: Shape, global_mesh: pxla.Mesh,
                       mesh_axes: MeshAxes) -> Mapping[Device, Index]:
   indices = _get_indices(global_shape, global_mesh, mesh_axes)
   # The type: ignore is to ignore the type returned by `spec_to_indices`.
-  return {
-      d: i
-      for d, i in safe_zip(global_mesh.devices.flat, indices)}  # type: ignore
+  return dict(safe_zip(global_mesh.devices.flat, indices))
 
 
 @functools.lru_cache(maxsize=4096)
@@ -665,9 +662,7 @@ mlir.register_constant_handler(GlobalDeviceArray, _gda_mlir_constant_handler)
 def _gda_shard_arg(x, devices, indices):
   x._check_if_deleted()
   # self._sharded_buffer can be None if _DeviceArray is used.
-  if x._sharded_buffer is None:
-    return x._device_buffers
-  return x._sharded_buffer
+  return x._device_buffers if x._sharded_buffer is None else x._sharded_buffer
 pxla.shard_arg_handlers[GlobalDeviceArray] = _gda_shard_arg
 
 

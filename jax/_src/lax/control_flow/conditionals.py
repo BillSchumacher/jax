@@ -113,7 +113,7 @@ def switch(index, branches: Sequence[Callable], *operands,
 
   branches = tuple(branches)
 
-  if len(branches) == 0:
+  if not branches:
     raise ValueError("Empty branch sequence")
   elif len(branches) == 1:
     return branches[0](*operands)
@@ -137,8 +137,7 @@ def switch(index, branches: Sequence[Callable], *operands,
                           out_trees[0], jaxprs[0].out_avals,
                           out_tree, jaxpr.out_avals)
   joined_effects = core.join_effects(*(jaxpr.effects for jaxpr in jaxprs))
-  disallowed_effects = allowed_effects.filter_not_in(joined_effects)
-  if disallowed_effects:
+  if disallowed_effects := allowed_effects.filter_not_in(joined_effects):
     raise NotImplementedError(
         f'Effects not supported in `switch`: {disallowed_effects}')
   if joined_effects:
@@ -221,11 +220,7 @@ def _cond(pred, true_fun: Callable, false_fun: Callable, *operands,
       raise TypeError(msg.format(pred_dtype))
 
   if config.jax_disable_jit and isinstance(core.get_aval(pred), ConcreteArray):
-    if pred:
-      return true_fun(*operands)
-    else:
-      return false_fun(*operands)
-
+    return true_fun(*operands) if pred else false_fun(*operands)
   ops, ops_tree = tree_flatten(operands)
   if linear is None:
     linear_ops = [False] * len(ops)
@@ -246,8 +241,7 @@ def _cond(pred, true_fun: Callable, false_fun: Callable, *operands,
                         out_tree, true_jaxpr.out_avals,
                         false_out_tree, false_jaxpr.out_avals)
   joined_effects = core.join_effects(true_jaxpr.effects, false_jaxpr.effects)
-  disallowed_effects = allowed_effects.filter_not_in(joined_effects)
-  if disallowed_effects:
+  if disallowed_effects := allowed_effects.filter_not_in(joined_effects):
     raise NotImplementedError(
         f'Effects not supported in `cond`: {disallowed_effects}')
 
@@ -305,8 +299,7 @@ def _cond_with_per_branch_args(pred,
 
 def _cond_abstract_eval(*avals, branches, **_):
   joined_effects = core.join_effects(*(b.effects for b in branches))
-  disallowed_effects = allowed_effects.filter_not_in(joined_effects)
-  if disallowed_effects:
+  if disallowed_effects := allowed_effects.filter_not_in(joined_effects):
     raise NotImplementedError(
         f'Effects not supported in `cond`: {disallowed_effects}')
   joined_effects = core.join_effects(*(b.effects for b in branches))
@@ -314,9 +307,10 @@ def _cond_abstract_eval(*avals, branches, **_):
     state.RefEffect)}
   jaxpr_aval_effects = state.get_ref_state_effects(
       [v.aval for v in branches[0].jaxpr.invars], joined_effects)
-  aval_effects = [set(eff.replace(ref_aval=aval) for eff in effs) for aval, effs
-      in zip(avals[1:], jaxpr_aval_effects)
-      if isinstance(aval, state.ShapedArrayRef)]
+  aval_effects = [{eff.replace(ref_aval=aval)
+                   for eff in effs}
+                  for aval, effs in zip(avals[1:], jaxpr_aval_effects)
+                  if isinstance(aval, state.ShapedArrayRef)]
   nonlocal_state_effects = core.join_effects(*aval_effects)
   all_effects = (joined_effects - state_effects) | nonlocal_state_effects
   return map(raise_to_shaped, branches[0].out_avals), all_effects
@@ -752,8 +746,7 @@ def _cond_typecheck(*in_atoms, branches, linear):
   jaxpr0_in_avals_str = _avals_short(jaxpr0.in_avals)
   jaxpr0_out_avals_str = _avals_short(jaxpr0.out_avals)
   joined_effects = core.join_effects(*(b.effects for b in branches))
-  disallowed_effects = allowed_effects.filter_not_in(joined_effects)
-  if disallowed_effects:
+  if disallowed_effects := allowed_effects.filter_not_in(joined_effects):
     raise NotImplementedError(
         f'Effects not supported in `cond`: {disallowed_effects}')
 
@@ -863,8 +856,8 @@ def _cond_state_discharge_rule(in_avals, out_avals, *args, branches, linear):
   out_ref_vals, out_vals = util.split_list(
       out_vals, [len(out_vals) - len(out_avals)])
   ref_val_iter = iter(out_ref_vals)
-  new_invals = []
-  for aval in in_avals:
-    new_invals.append(
-        next(ref_val_iter) if isinstance(aval, state.ShapedArrayRef) else None)
+  new_invals = [
+      next(ref_val_iter) if isinstance(aval, state.ShapedArrayRef) else None
+      for aval in in_avals
+  ]
   return new_invals, out_vals
